@@ -4,9 +4,10 @@
 Sends UI and REST requests of anonymous visitors, record owners, community curators and
 an administrator to the oarepo/inveniordm-reference-repo instance, in process through
 the Flask test client. It compares the installed packages (``baseline``) with the code
-in the ``--patched-src`` directories, put first on ``sys.path`` (``patched``): request
-time, time spent in ``allows()``, and that both answer every request with the same
-status code.
+in the ``--patched-src`` directories, put first on ``sys.path`` (``patched``): the
+end-to-end time of the requests and that both answer every request with the same status
+code. Plugins in ``rdmbench/plugins``, enabled with ``--plugin``, measure more of every
+request, e.g. ``allows`` the time spent in permission checks.
 
 ``prepare.sh [setup options]`` installs the reference repo's venv, starts the services
 and generates the database; ``bench.sh [compare options]`` runs the comparison. A round
@@ -27,8 +28,8 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
-from rdmbench import instance
-from rdmbench.measure import AllowsTimer, Driver
+from rdmbench import instance, plugins
+from rdmbench.measure import Driver
 from rdmbench.report import summarize
 from rdmbench.state import STATE, StateSpec, load_state, save_state
 from rdmbench.workload import DEFAULT_REQUESTS, KINDS, Pool, build_round, plan_round
@@ -60,24 +61,30 @@ def cmd_run(args):
     pool = Pool(state)
     requests = {kind: getattr(args, kind) for kind in KINDS}
     plan = plan_round(requests, pool)
-    timer = AllowsTimer()
-    timer.install()
-    driver = Driver(instance.create_app(), state, timer)
+    active = [plugins.load(name)() for name in args.plugin]
+    for plugin in active:
+        plugin.install()
+    driver = Driver(instance.create_app(), state, active)
+    metrics = plugins.metrics(args.plugin)
 
     warmup = build_round(pool, plan, random.Random(SEED - 1))
-    driver.check_logins(warmup)
+    driver.check_logins(warmup) # sanity check
     driver.run_round(warmup)
     source = instance.code_under_test(args.variant, args.patched_src)
     rounds = []
     for index in range(args.rounds):
         samples = driver.run_round(build_round(pool, plan, random.Random(SEED + index)))
         rounds.append(samples)
-        print(
-            f"[{args.variant}] round {index + 1}/{args.rounds}: {sum(s['seconds'] for s in samples):.1f}s, "
-            f"allows() {sum(s['allows_seconds'] for s in samples):.1f}s",
-            flush=True,
-        )
-    result = {"variant": args.variant, "source": source, "state": state["spec"], "requests": requests, "rounds": rounds}
+        totals = ", ".join(f"{m.title} {sum(s[m.key] for s in samples):{m.fmt}}" for m in metrics)
+        print(f"[{args.variant}] round {index + 1}/{args.rounds}: {totals}", flush=True)
+    result = {
+        "variant": args.variant,
+        "source": source,
+        "state": state["spec"],
+        "requests": requests,
+        "plugins": args.plugin,
+        "rounds": rounds,
+    }
     args.out.write_text(json.dumps(result))
 
 
@@ -92,6 +99,7 @@ def cmd_compare(args):
             command = [sys.executable, __file__, "run", "--variant", variant, "--out", str(out)]
             command += ["--rounds", str(args.rounds)]
             command += [arg for src in args.patched_src for arg in ("--patched-src", str(src))]
+            command += [arg for name in args.plugin for arg in ("--plugin", name)]
             command += [arg for kind in KINDS for arg in (f"--{kind}", str(getattr(args, kind)))]
             subprocess.run(command, check=True)
             outputs[variant].append(json.loads(out.read_text()))
@@ -127,6 +135,13 @@ def main():
             required=True,
             help="directory put first on sys.path for the patched variant, e.g. a checkout of the "
             "package under test (repeatable)",
+        )
+        sub.add_argument(
+            "--plugin",
+            choices=plugins.NAMES,
+            action="append",
+            default=[],
+            help="also record what this plugin of rdmbench/plugins measures (repeatable)",
         )
         for kind in KINDS:
             sub.add_argument(

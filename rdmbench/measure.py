@@ -1,6 +1,5 @@
-"""Sends benchmark rounds through the Flask test client, timing every request and its ``allows()`` calls."""
+"""Sends benchmark rounds through the Flask test client, timing every request and running the plugins on it."""
 
-import functools
 import random
 import sys
 import time
@@ -10,49 +9,15 @@ from rdmbench.state import record_data
 from rdmbench.workload import ANONYMOUS
 
 
-class AllowsTimer:
-    """Counts and times the outermost ``allows()`` calls."""
-
-    def __init__(self):
-        self.calls = 0
-        self.seconds = 0.0
-        self._active = False
-
-    def install(self):
-        from invenio_access.permissions import Permission
-        from invenio_records_permissions.policies.base import BasePermissionPolicy
-
-        for cls in (Permission, BasePermissionPolicy):
-            if "allows" in cls.__dict__:
-                cls.allows = self._wrap(cls.__dict__["allows"])
-
-    def _wrap(self, allows):
-        @functools.wraps(allows)
-        def timed_allows(permission, identity):
-            # An allows() calling another one, e.g. through super(), is part of the outer call.
-            if self._active:
-                return allows(permission, identity)
-            self._active = True
-            start = time.perf_counter()
-            try:
-                return allows(permission, identity)
-            finally:
-                self.seconds += time.perf_counter() - start
-                self.calls += 1
-                self._active = False
-
-        return timed_allows
-
-
 class Driver:
     """Sends steps like real clients do: reads in a browser session, writes to the REST API with a token."""
 
-    def __init__(self, app, state, timer):
+    def __init__(self, app, state, plugins):
         self.app = app
-        self.timer = timer
+        self.plugins = plugins
         self.tokens = {u["email"]: u["token"] for u in [state["admin"], *state["users"]]}
         self.browsers = {}
-        self.api_client = app.test_client(use_cookies=False)
+        self.api_client = app.test_client(use_cookies=False) #REV: why test_client?
         self.drafts = {}  # Step.draft -> id of the draft created for it
         self.created = {}  # id of every draft created since create_drafts -> its owner
 
@@ -75,20 +40,19 @@ class Driver:
         return sample
 
     def send(self, client, label, method, url, **kwargs):
-        calls, seconds = self.timer.calls, self.timer.seconds
+        before = self.plugin_totals()
         start = time.perf_counter()
         response = client.open(url, method=method, base_url=BASE_URL, **kwargs)
         response.get_data()
         elapsed = time.perf_counter() - start
         response.close()
-        sample = {
-            "label": label,
-            "status": response.status_code,
-            "seconds": elapsed,
-            "allows_seconds": self.timer.seconds - seconds,
-            "allows_calls": self.timer.calls - calls,
-        }
+        after = self.plugin_totals()
+        sample = {"label": label, "status": response.status_code, "seconds": elapsed}
+        sample |= {key: after[key] - before[key] for key in after}
         return response, sample
+
+    def plugin_totals(self):
+        return {key: value for plugin in self.plugins for key, value in plugin.totals().items()}
 
     def send_api(self, actor, label, method, url, body=None):
         headers = {"Authorization": f"Bearer {self.tokens[actor]}"}

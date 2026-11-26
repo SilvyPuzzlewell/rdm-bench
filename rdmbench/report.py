@@ -3,6 +3,7 @@
 import statistics
 from collections import Counter
 
+from rdmbench import plugins
 from rdmbench.state import StateSpec
 from rdmbench.workload import BY_LABEL, KINDS, describe_requests
 
@@ -11,7 +12,7 @@ VARIANTS = ("baseline", "patched")
 
 def summarize(outputs):
     """Compare the results of both variants, given as ``{variant: [result of each run]}``."""
-    return "\n\n".join([_header(outputs), _times(outputs), _status_codes(outputs)]) + "\n"
+    return "\n\n".join([_header(outputs), _medians(outputs), _status_codes(outputs)]) + "\n"
 
 
 def _change(before, after):
@@ -24,13 +25,15 @@ def _header(outputs):
     lines += [
         f"database  {StateSpec(**first['state']).describe()}",
         f"workload  {describe_requests(first['requests'])}",
+        f"plugins   {', '.join(first['plugins']) or 'none'}",
         f"{len(outputs['baseline'])} runs per variant x {len(first['rounds'])} rounds",
     ]
     return "\n".join(lines)
 
 
-def _times(outputs):
-    """Medians per round of request time, ``allows()`` time and calls, for all requests and per type."""
+def _medians(outputs):
+    """Medians per round of every metric, for all requests and per type."""
+    metrics = plugins.metrics(outputs["baseline"][0]["plugins"])
     rounds = {v: [samples for result in outputs[v] for samples in result["rounds"]] for v in VARIANTS}
     sizes = Counter(BY_LABEL[s["label"]].kind for s in rounds["baseline"][0])
 
@@ -40,19 +43,15 @@ def _times(outputs):
             for samples in rounds[variant]
         )
 
-    lines = [
-        f"{'median/round (s)':16} {'requests':>8}   {'time b':>8} {'time p':>8} {'change':>7}"
-        f"   {'allows b':>8} {'allows p':>8} {'change':>7}   {'calls b':>7} {'calls p':>7}"
-    ]
+    header = f"{'median/round':16} {'requests':>8}"
+    header += "".join(f"   {m.title + ' b':>8} {m.title + ' p':>8} {'change':>7}" for m in metrics)
+    lines = [header]
     for kind in ["all", *(k for k in KINDS if sizes[k])]:
-        (time_b, allows_b, calls_b), (time_p, allows_p, calls_p) = (
-            [median(v, kind, key) for key in ("seconds", "allows_seconds", "allows_calls")] for v in VARIANTS
-        )
-        n = sizes.total() if kind == "all" else sizes[kind]
-        lines.append(
-            f"{kind:16} {n:8}   {time_b:8.2f} {time_p:8.2f} {_change(time_b, time_p):>7}"
-            f"   {allows_b:8.2f} {allows_p:8.2f} {_change(allows_b, allows_p):>7}   {calls_b:7.0f} {calls_p:7.0f}"
-        )
+        line = f"{kind:16} {sizes.total() if kind == 'all' else sizes[kind]:8}"
+        for m in metrics:
+            before, after = (median(v, kind, m.key) for v in VARIANTS)
+            line += f"   {before:8{m.fmt}} {after:8{m.fmt}} {_change(before, after):>7}"
+        lines.append(line)
     return "\n".join(lines)
 
 
