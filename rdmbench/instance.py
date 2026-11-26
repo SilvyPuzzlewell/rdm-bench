@@ -10,6 +10,7 @@ from pathlib import Path
 
 BENCH_DIR = Path(__file__).resolve().parents[1]
 INSTANCE = BENCH_DIR / "instance"
+REPO = BENCH_DIR.parent / "inveniordm-reference-repo"
 BASE_URL = "https://127.0.0.1:5000"
 SERVICES = ["cache", "db", "mq", "search"]
 ROLES = [
@@ -19,11 +20,11 @@ ROLES = [
 ]
 
 
-def compose(repo, *args):
+def compose(*args):
     """Run ``docker compose`` on the reference repo's service containers."""
     command = ["docker", "compose", "--env-file", "variables", "-f", "docker-compose.yml"]
     command += ["-f", "docker-compose.ports.yml", *args]
-    subprocess.run(command, cwd=repo, check=True)
+    subprocess.run(command, cwd=REPO, check=True)
 
 
 def read_variables(path):
@@ -77,15 +78,15 @@ def service_env(v):
     }
 
 
-def prepare_environment(repo):
+def prepare_environment():
     """Export the service configuration and link the repo's files into the instance."""
     INSTANCE.mkdir(exist_ok=True)
     (INSTANCE / "data").mkdir(exist_ok=True)
     for name in ("invenio.cfg", "app_data", "templates", "static"):
         link = INSTANCE / name
         if not link.exists():
-            link.symlink_to(repo / name)
-    os.environ.update(service_env(read_variables(repo / "variables")))
+            link.symlink_to(REPO / name)
+    os.environ.update(service_env(read_variables(REPO / "variables")))
 
 
 class _NoAsset(str):
@@ -161,11 +162,11 @@ def use_variant(variant, patched_src):
 
 
 def code_under_test(variant, patched_src):
-    """Check where the app imported the modules of ``patched_src`` from; return their files and versions.
+    """Check where the app imported the modules of ``patched_src`` from; return what code it ran.
 
     Call it once the app has imported what it uses, e.g. after a round of requests.
     """
-    files, versions = [], []
+    versions = []
     for src in patched_src:
         names = [m.name for m in pkgutil.iter_modules([str(src)]) if m.name in sys.modules]
         if not names:
@@ -174,12 +175,11 @@ def code_under_test(variant, patched_src):
             file = Path(sys.modules[name].__file__)
             if file.is_relative_to(src) != (variant == "patched"):
                 raise SystemExit(f"the {variant} variant imported {name} from {file}")
-            files.append(str(file))
         if variant == "patched":
             versions.append(f"{src.name} {git_describe(src)}")
         else:
             versions += [installed_version(name) for name in names]
-    return ", ".join(files), ", ".join(versions)
+    return ", ".join(versions)
 
 
 def installed_version(module):

@@ -87,10 +87,6 @@ class StateSpec:
         )
 
 
-def describe_state(spec):
-    return StateSpec(**spec).describe() if spec else "not recorded (set up before setup took parameters)"
-
-
 def load_state():
     if not STATE.exists():
         raise SystemExit(f"{STATE} does not exist; run setup first")

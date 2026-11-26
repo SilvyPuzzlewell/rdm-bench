@@ -3,39 +3,20 @@
 import functools
 import random
 import sys
-import threading
 import time
-from collections import defaultdict
-from contextlib import nullcontext
 
 from rdmbench.instance import BASE_URL
 from rdmbench.state import record_data
 from rdmbench.workload import ANONYMOUS
 
 
-def measure_round(driver, timer, steps, profiler=None):
-    """Send one round; return its samples and the ``allows()`` calls and seconds per policy.
-
-    The drafts that updates and deletes work on are created before the round, and the
-    drafts left over are deleted after it, both unmeasured.
-    """
-    driver.create_drafts(steps)
-    timer.restart()
-    with profiler or nullcontext():
-        samples = driver.run(steps)
-    policies = timer.restart()
-    driver.delete_drafts()
-    return {"samples": samples, "policies": policies}
-
-
 class AllowsTimer:
-    """Times the outermost ``allows()`` calls, in total and per policy class and action."""
+    """Counts and times the outermost ``allows()`` calls."""
 
     def __init__(self):
-        self._local = threading.local()
         self.calls = 0
         self.seconds = 0.0
-        self.by_policy = defaultdict(lambda: [0, 0.0])
+        self._active = False
 
     def install(self):
         from invenio_access.permissions import Permission
@@ -45,30 +26,20 @@ class AllowsTimer:
             if "allows" in cls.__dict__:
                 cls.allows = self._wrap(cls.__dict__["allows"])
 
-    def restart(self):
-        """Count per policy afresh; return what was counted so far."""
-        counted, self.by_policy = self.by_policy, defaultdict(lambda: [0, 0.0])
-        return dict(counted)
-
     def _wrap(self, allows):
-        timer = self
-
         @functools.wraps(allows)
         def timed_allows(permission, identity):
-            if getattr(timer._local, "active", False):
+            # An allows() calling another one, e.g. through super(), is part of the outer call.
+            if self._active:
                 return allows(permission, identity)
-            timer._local.active = True
+            self._active = True
             start = time.perf_counter()
             try:
                 return allows(permission, identity)
             finally:
-                elapsed = time.perf_counter() - start
-                timer._local.active = False
-                timer.calls += 1
-                timer.seconds += elapsed
-                key = f"{type(permission).__name__}:{getattr(permission, 'action', '-')}"
-                timer.by_policy[key][0] += 1
-                timer.by_policy[key][1] += elapsed
+                self.seconds += time.perf_counter() - start
+                self.calls += 1
+                self._active = False
 
         return timed_allows
 
@@ -85,8 +56,12 @@ class Driver:
         self.drafts = {}  # Step.draft -> id of the draft created for it
         self.created = {}  # id of every draft created since create_drafts -> its owner
 
-    def run(self, steps):
-        return [self.send_step(step) for step in steps]
+    def run_round(self, steps):
+        """Send ``steps``; drafts for updates and deletes are created before and deleted after, unmeasured."""
+        self.create_drafts(steps)
+        samples = [self.send_step(step) for step in steps]
+        self.delete_drafts()
+        return samples
 
     def send_step(self, step):
         if step.method == "GET":

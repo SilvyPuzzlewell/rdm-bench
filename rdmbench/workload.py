@@ -1,29 +1,14 @@
 """The requests of a benchmark round: the endpoint catalog and how rounds are drawn from it."""
 
-import argparse
 import sys
-from collections import Counter
 from dataclasses import dataclass
 
 from rdmbench.state import WORDS, record_data
 
 ANONYMOUS = "anonymous"
 KINDS = ("search", "read", "create", "update", "delete")
-DEFAULT_REQUESTS = [("mix", 300)]
-POOLS = {
-    "public": "public records",
-    "restricted": "restricted records",
-    "with_files": "public records with files",
-    "curated": "restricted records in a community",
-    "drafts": "drafts",
-    "requests": "open requests",
-    "communities": "public communities",
-    "owners": "users owning records or drafts",
-}
-ACTORS = (
-    "actor: owner = owner of the picked item, other = a user who does not own it, "
-    "curator = a curator of its community, user = any user"
-)
+# 300 requests in the proportions of the endpoint weights.
+DEFAULT_REQUESTS = {"search": 115, "read": 161, "create": 8, "update": 8, "delete": 8}
 
 
 class Pool:
@@ -68,10 +53,6 @@ class Endpoint:
     pool: str | None = None
     method: str = "GET"
 
-    @property
-    def needs(self):
-        return POOLS.get(self.pool)
-
     def available(self, pool):
         return not self.pool or bool(getattr(pool, self.pool))
 
@@ -98,8 +79,8 @@ class Endpoint:
         return Step(actor, self.label, self.method, url, body, draft)
 
 
-# Weights set each endpoint's share of ``mix`` and of its type: a production-like mix of
-# 55% anonymous, 30% owner, 12% curator and 3% administrator requests.
+# Weights split a type's requests over its endpoints. Across all endpoints they make a
+# production-like mix of 55% anonymous, 30% owner, 12% curator and 3% administrator requests.
 ENDPOINTS = [
     # anonymous visitors
     Endpoint("ui:record-landing", "read", 14, "anonymous", "/records/{item[id]}", "public"),
@@ -140,20 +121,6 @@ ENDPOINTS = [
 BY_LABEL = {e.label: e for e in ENDPOINTS}
 
 
-def kind_of(label):
-    return BY_LABEL[label].kind if label in BY_LABEL else "?"
-
-
-def parse_request(text):
-    """argparse type of ``--requests`` items: ``NAME=COUNT``."""
-    name, _, count = text.partition("=")
-    if name not in ("mix", *KINDS, *BY_LABEL) or not count.isdigit():
-        raise argparse.ArgumentTypeError(
-            f"{text!r} is not TYPE=COUNT (types: mix, {', '.join(KINDS)}) or ENDPOINT=COUNT (see endpoints)"
-        )
-    return name, int(count)
-
-
 def apportion(total, weights):
     """Split ``total`` in proportion to ``weights``, by largest remainders."""
     whole = sum(weights.values())
@@ -166,35 +133,20 @@ def apportion(total, weights):
 
 
 def plan_round(requests, pool):
-    """Requests per endpoint in every round, from ``(name, count)`` pairs of ``--requests``."""
-    counts = Counter()
-    skipped = []
-    for name, count in requests:
-        if name in BY_LABEL:
-            if not BY_LABEL[name].available(pool):
-                raise SystemExit(f"{name}: the benchmark database has no {BY_LABEL[name].needs}")
-            counts[name] += count
-            continue
-        group = [e for e in ENDPOINTS if name in ("mix", e.kind)]
-        usable = [e for e in group if e.available(pool)]
-        skipped += [e for e in group if e not in usable and e not in skipped]
-        if count and not usable:
-            raise SystemExit(f"{name}: the benchmark database has nothing its endpoints need")
-        counts.update(apportion(count, {e.label: e.weight for e in usable}))
-    for e in skipped:
-        print(f"skipping {e.label}: the benchmark database has no {e.needs}", file=sys.stderr)
-    plan = {label: counts[label] for label in BY_LABEL if counts[label]}
-    if not plan:
-        raise SystemExit("the workload has no requests")
+    """Requests per endpoint in every round: the count of each type split over its endpoints by weight."""
+    plan = {}
+    for kind, count in requests.items():
+        endpoints = [e for e in ENDPOINTS if e.kind == kind]
+        for e in endpoints:
+            if not e.available(pool):
+                print(f"skipping {e.label}: the benchmark database has no {e.pool}", file=sys.stderr)
+        plan |= apportion(count, {e.label: e.weight for e in endpoints if e.available(pool)})
     return plan
 
 
-def describe_plan(plan):
-    per_kind = Counter()
-    for label, count in plan.items():
-        per_kind[kind_of(label)] += count
-    kinds = ", ".join(f"{kind} {per_kind[kind]}" for kind in KINDS if per_kind[kind])
-    return f"{sum(plan.values())} requests per round ({kinds})"
+def describe_requests(requests):
+    kinds = ", ".join(f"{kind} {count}" for kind, count in requests.items() if count)
+    return f"{sum(requests.values())} requests per round ({kinds})"
 
 
 def build_round(pool, plan, rng):
@@ -202,15 +154,3 @@ def build_round(pool, plan, rng):
     steps = [BY_LABEL[label].step(pool, rng, i) for label, count in plan.items() for i in range(count)]
     rng.shuffle(steps)
     return steps
-
-
-def describe_endpoints(pool=None):
-    """The endpoint catalog; with ``pool``, also how many items each endpoint picks from."""
-    lines = [f"{'type':7} {'endpoint':27} {'weight':>6}  {'actor':10}{'picks from':40}request"]
-    for e in ENDPOINTS:
-        picks = POOLS.get(e.pool, "")
-        if pool and e.pool:
-            picks += f" ({len(getattr(pool, e.pool))})"
-        lines.append(f"{e.kind:7} {e.label:27} {e.weight:6}  {e.actor:10}{picks:40}{e.method} {e.url}")
-    lines += ["", "A type or mix count is split over its endpoints in proportion to their weights.", ACTORS]
-    return "\n".join(lines)
