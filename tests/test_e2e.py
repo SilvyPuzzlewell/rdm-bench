@@ -7,13 +7,16 @@ real instance and setup flushes it, so the tests flush it again when done; it ho
 caches and sessions.
 """
 
+import importlib.util
 import json
+import os
 import shutil
 import subprocess
 import sys
 import urllib.parse
 import urllib.request
 from importlib import metadata
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -33,6 +36,20 @@ SETUP = (
 # As many requests of each type as its endpoints weigh, so that every endpoint gets at least one.
 REQUESTS = [arg for kind in KINDS for arg in (f"--{kind}", str(sum(e.weight for e in ENDPOINTS if e.kind == kind)))]
 EXPECTED_STATUS = {"api:draft-create": 201, "api:draft-delete": 204, "ui:record-landing-denied": 302}
+DELAY = 0.005
+SLOWDOWN = f"""
+import time as _time
+
+_allows = Permission.allows
+
+
+def _slow_allows(self, identity):
+    _time.sleep({DELAY})
+    return _allows(self, identity)
+
+
+Permission.allows = _slow_allows
+"""
 
 
 class Throwaway:
@@ -53,10 +70,10 @@ class Throwaway:
         (repo / "variables").write_text((instance.REPO / "variables").read_text() + "\n" + overrides)
         self.services = instance.read_variables(repo / "variables")
 
-    def run(self, *args):
-        """Run the copy's ``rdm_permissions_bench.py``."""
+    def run(self, *args, env=None):
+        """Run the copy's ``rdm_permissions_bench.py`` with ``env`` added to the environment."""
         command = [sys.executable, str(self.copy / "rdm_permissions_bench.py"), *args]
-        return subprocess.run(command, capture_output=True, text=True)
+        return subprocess.run(command, capture_output=True, text=True, env=os.environ | (env or {}))
 
     def invenio(self, *args, check=True):
         """Run the ``invenio`` command on the copy's instance."""
@@ -147,3 +164,34 @@ def test_allows_plugin_counts_permission_checks_in_every_round(compared):
 def test_compare_leaves_no_drafts_behind(bench, compared):
     assert bench.count("rdmrecords-drafts") == compared.drafts_before
     assert "deleting draft" not in compared.stderr
+
+
+def copy_invenio_access(target, append=""):
+    """Copy the installed invenio_access into ``target``, with ``append`` added to its permissions.py."""
+    source = Path(importlib.util.find_spec("invenio_access").origin).parent
+    shutil.copytree(source, target / "invenio_access", ignore=shutil.ignore_patterns("__pycache__"))
+    with open(target / "invenio_access" / "permissions.py", "a") as permissions:
+        permissions.write(append)
+
+
+@pytest.mark.parametrize("slowed, sign", [("patched", 1), ("baseline", -1)])
+def test_compare_reports_a_delay_added_to_either_variant(bench, tmp_path, slowed, sign):
+    slow, fast = tmp_path / "slow", tmp_path / "fast"
+    copy_invenio_access(slow, SLOWDOWN)
+    copy_invenio_access(fast)
+    # The baseline imports from PYTHONPATH, the patched variant from --patched-src ahead of it.
+    patched, baseline = (slow, fast) if slowed == "patched" else (fast, slow)
+    options = ["--patched-src", str(patched), "--plugin", "allows", "--runs", "1", "--rounds", "1", *REQUESTS]
+    compare = bench.run("compare", *options, env={"PYTHONPATH": str(baseline)})
+    assert compare.returncode == 0, compare.stdout + compare.stderr
+    row = next(line.split() for line in compare.stdout.splitlines() if line.startswith("all "))
+    time_b, time_p, time_change, allows_b, allows_p, allows_change, calls_b, calls_p, _ = (
+        float(field.rstrip("%")) for field in row[2:]
+    )
+
+    # Every counted allows() call of the slowed variant sleeps once.
+    added = sign * calls_b * DELAY
+    assert time_p - time_b == pytest.approx(added, rel=0.2)
+    assert allows_p - allows_b == pytest.approx(added, rel=0.2)
+    assert time_change * sign > 0 and allows_change * sign > 0
+    assert calls_p == calls_b
