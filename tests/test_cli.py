@@ -5,6 +5,7 @@ from pathlib import Path
 
 import rdm_permissions_bench as cli
 from rdmbench import instance
+from rdmbench.workload import DEFAULT_WORKLOAD
 
 
 def test_cli_and_plugins_import_no_invenio():
@@ -46,6 +47,7 @@ def test_compare_alternates_the_variants_and_passes_its_options_to_every_run(tmp
             "--rounds": "2",
             "--patched-src": str(patched),
             "--plugin": "allows",
+            "--workload": str(DEFAULT_WORKLOAD),
             "--search": "115",
             "--read": "5",
             "--create": "8",

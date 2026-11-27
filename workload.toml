@@ -1,0 +1,61 @@
+# The default workload: the endpoints a benchmark round sends requests to and how many.
+# Pass another file with --workload.
+#
+# A round sends requests_per_round requests, split over the endpoints by weight. --search, --read,
+# --create, --update and --delete replace the share of one type, which its endpoints split by weight.
+# These weights make a production-like mix of 55% anonymous, 30% owner, 12% curator and 3%
+# administrator requests.
+#
+# Each endpoint has
+#   label   its name in the results
+#   kind    search, read, create, update or delete
+#   weight  its share of the requests, a whole number of at least 1
+#   actor   who sends it: anonymous; owner of the item; other, a user who does not own the item;
+#           curator of the item's community; user, any user; admin
+#   url     filled with the picked {item}, its {community} and a random {word}, e.g. {item[id]}; their
+#           fields are those in state.json. Updates and deletes get {draft} instead, a draft created
+#           for them before the round: updates of one actor share one, every delete has its own.
+#   pool    what the item is picked from, optional: public, restricted, with_files (public, with
+#           files), curated (restricted, in a community), drafts, requests, communities or owners
+#   method  GET unless given; GETs go through the actor's browser session, the others to the REST
+#           API with the actor's token, and POST and PUT send a generated record
+
+requests_per_round = 300
+
+endpoints = [
+  # anonymous visitors
+  { label = "ui:record-landing", kind = "read", weight = 14, actor = "anonymous", url = "/records/{item[id]}", pool = "public" },
+  { label = "api:record-read", kind = "read", weight = 8, actor = "anonymous", url = "/api/records/{item[id]}", pool = "public" },
+  { label = "api:search-records", kind = "search", weight = 8, actor = "anonymous", url = "/api/records?q=&sort=newest&size=10" },
+  { label = "api:search-records-query", kind = "search", weight = 4, actor = "anonymous", url = "/api/records?q={word}&size=10" },
+  { label = "ui:frontpage", kind = "read", weight = 3, actor = "anonymous", url = "/" },
+  { label = "ui:search", kind = "search", weight = 3, actor = "anonymous", url = "/search?q={word}" },
+  { label = "ui:record-landing-denied", kind = "read", weight = 3, actor = "anonymous", url = "/records/{item[id]}", pool = "restricted" },
+  { label = "api:record-files", kind = "read", weight = 3, actor = "anonymous", url = "/api/records/{item[id]}/files", pool = "with_files" },
+  { label = "api:search-communities", kind = "search", weight = 3, actor = "anonymous", url = "/api/communities?q=&size=10" },
+  { label = "ui:community-records", kind = "search", weight = 3, actor = "anonymous", url = "/communities/{item[slug]}/records", pool = "communities" },
+  { label = "api:community-records", kind = "search", weight = 3, actor = "anonymous", url = "/api/communities/{item[id]}/records", pool = "communities" },
+  # record owners
+  { label = "api:user-records", kind = "search", weight = 5, actor = "owner", url = "/api/user/records?q=&sort=updated-desc", pool = "owners" },
+  { label = "ui:dashboard-uploads", kind = "search", weight = 3, actor = "owner", url = "/me/uploads", pool = "owners" },
+  { label = "ui:record-landing-owner", kind = "read", weight = 5, actor = "owner", url = "/records/{item[id]}", pool = "public" },
+  { label = "ui:deposit-edit", kind = "read", weight = 3, actor = "owner", url = "/uploads/{item[id]}", pool = "drafts" },
+  { label = "api:draft-read", kind = "read", weight = 3, actor = "owner", url = "/api/records/{item[id]}/draft", pool = "drafts" },
+  { label = "api:user-requests", kind = "search", weight = 3, actor = "owner", url = "/api/user/requests?q=", pool = "owners" },
+  { label = "ui:record-landing-other", kind = "read", weight = 3, actor = "other", url = "/records/{item[id]}", pool = "public" },
+  { label = "ui:deposit-new", kind = "read", weight = 2, actor = "user", url = "/uploads/new" },
+  { label = "api:draft-create", kind = "create", weight = 3, actor = "user", url = "/api/records", method = "POST" },
+  { label = "api:draft-update", kind = "update", weight = 3, actor = "user", url = "/api/records/{draft}/draft", method = "PUT" },
+  { label = "api:draft-delete", kind = "delete", weight = 3, actor = "user", url = "/api/records/{draft}/draft", method = "DELETE" },
+  # community curators
+  { label = "api:community-requests", kind = "search", weight = 3, actor = "curator", url = "/api/communities/{community[id]}/requests?is_open=true", pool = "requests" },
+  { label = "ui:community-requests", kind = "search", weight = 2, actor = "curator", url = "/communities/{community[slug]}/requests", pool = "requests" },
+  { label = "api:request-read", kind = "read", weight = 2, actor = "curator", url = "/api/requests/{item[id]}", pool = "requests" },
+  { label = "api:request-timeline", kind = "read", weight = 2, actor = "curator", url = "/api/requests/{item[id]}/timeline", pool = "requests" },
+  { label = "ui:request-detail", kind = "read", weight = 2, actor = "curator", url = "/communities/{community[slug]}/requests/{item[id]}", pool = "requests" },
+  { label = "ui:record-landing-curator", kind = "read", weight = 1, actor = "curator", url = "/records/{item[id]}", pool = "curated" },
+  # administrator
+  { label = "ui:record-landing-admin", kind = "read", weight = 1, actor = "admin", url = "/records/{item[id]}", pool = "public" },
+  { label = "api:record-read-admin", kind = "read", weight = 1, actor = "admin", url = "/api/records/{item[id]}", pool = "restricted" },
+  { label = "api:search-records-admin", kind = "search", weight = 1, actor = "admin", url = "/api/records?q=&size=10" },
+]

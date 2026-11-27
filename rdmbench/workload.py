@@ -1,14 +1,19 @@
-"""The requests of a benchmark round: the endpoint catalog and how rounds are drawn from it."""
+"""The requests of a benchmark round: the workload file's endpoints and how rounds are drawn from them."""
 
 import sys
+import tomllib
+from collections import Counter
 from dataclasses import dataclass
+from functools import cached_property
 
+from rdmbench.instance import BENCH_DIR
 from rdmbench.state import WORDS, record_data
 
+DEFAULT_WORKLOAD = BENCH_DIR / "workload.toml"
 ANONYMOUS = "anonymous"
 KINDS = ("search", "read", "create", "update", "delete")
-# 300 requests in the proportions of the endpoint weights.
-DEFAULT_REQUESTS = {"search": 115, "read": 161, "create": 8, "update": 8, "delete": 8}
+ACTORS = (ANONYMOUS, "owner", "other", "curator", "user", "admin")
+POOLS = ("public", "restricted", "with_files", "curated", "drafts", "requests", "communities", "owners")
 
 
 class Pool:
@@ -43,7 +48,10 @@ class Step:
 
 @dataclass(frozen=True)
 class Endpoint:
-    """A request that picks an ``item`` from ``pool`` and formats ``url`` with it and its ``community``."""
+    """A request that picks an ``item`` from ``pool`` and formats ``url`` with it and its ``community``.
+
+    workload.toml describes the fields.
+    """
 
     label: str
     kind: str
@@ -79,48 +87,6 @@ class Endpoint:
         return Step(actor, self.label, self.method, url, body, draft)
 
 
-# Weights split a type's requests over its endpoints. Across all endpoints they make a
-# production-like mix of 55% anonymous, 30% owner, 12% curator and 3% administrator requests.
-ENDPOINTS = [
-    # anonymous visitors
-    Endpoint("ui:record-landing", "read", 14, "anonymous", "/records/{item[id]}", "public"),
-    Endpoint("api:record-read", "read", 8, "anonymous", "/api/records/{item[id]}", "public"),
-    Endpoint("api:search-records", "search", 8, "anonymous", "/api/records?q=&sort=newest&size=10"),
-    Endpoint("api:search-records-query", "search", 4, "anonymous", "/api/records?q={word}&size=10"),
-    Endpoint("ui:frontpage", "read", 3, "anonymous", "/"),
-    Endpoint("ui:search", "search", 3, "anonymous", "/search?q={word}"),
-    Endpoint("ui:record-landing-denied", "read", 3, "anonymous", "/records/{item[id]}", "restricted"),
-    Endpoint("api:record-files", "read", 3, "anonymous", "/api/records/{item[id]}/files", "with_files"),
-    Endpoint("api:search-communities", "search", 3, "anonymous", "/api/communities?q=&size=10"),
-    Endpoint("ui:community-records", "search", 3, "anonymous", "/communities/{item[slug]}/records", "communities"),
-    Endpoint("api:community-records", "search", 3, "anonymous", "/api/communities/{item[id]}/records", "communities"),
-    # record owners
-    Endpoint("api:user-records", "search", 5, "owner", "/api/user/records?q=&sort=updated-desc", "owners"),
-    Endpoint("ui:dashboard-uploads", "search", 3, "owner", "/me/uploads", "owners"),
-    Endpoint("ui:record-landing-owner", "read", 5, "owner", "/records/{item[id]}", "public"),
-    Endpoint("ui:deposit-edit", "read", 3, "owner", "/uploads/{item[id]}", "drafts"),
-    Endpoint("api:draft-read", "read", 3, "owner", "/api/records/{item[id]}/draft", "drafts"),
-    Endpoint("api:user-requests", "search", 3, "owner", "/api/user/requests?q=", "owners"),
-    Endpoint("ui:record-landing-other", "read", 3, "other", "/records/{item[id]}", "public"),
-    Endpoint("ui:deposit-new", "read", 2, "user", "/uploads/new"),
-    Endpoint("api:draft-create", "create", 3, "user", "/api/records", method="POST"),
-    Endpoint("api:draft-update", "update", 3, "user", "/api/records/{draft}/draft", method="PUT"),
-    Endpoint("api:draft-delete", "delete", 3, "user", "/api/records/{draft}/draft", method="DELETE"),
-    # community curators
-    Endpoint("api:community-requests", "search", 3, "curator", "/api/communities/{community[id]}/requests?is_open=true", "requests"),
-    Endpoint("ui:community-requests", "search", 2, "curator", "/communities/{community[slug]}/requests", "requests"),
-    Endpoint("api:request-read", "read", 2, "curator", "/api/requests/{item[id]}", "requests"),
-    Endpoint("api:request-timeline", "read", 2, "curator", "/api/requests/{item[id]}/timeline", "requests"),
-    Endpoint("ui:request-detail", "read", 2, "curator", "/communities/{community[slug]}/requests/{item[id]}", "requests"),
-    Endpoint("ui:record-landing-curator", "read", 1, "curator", "/records/{item[id]}", "curated"),
-    # administrator
-    Endpoint("ui:record-landing-admin", "read", 1, "admin", "/records/{item[id]}", "public"),
-    Endpoint("api:record-read-admin", "read", 1, "admin", "/api/records/{item[id]}", "restricted"),
-    Endpoint("api:search-records-admin", "search", 1, "admin", "/api/records?q=&size=10"),
-]
-BY_LABEL = {e.label: e for e in ENDPOINTS}
-
-
 def apportion(total, weights):
     """Split ``total`` in proportion to ``weights``, by largest remainders."""
     whole = sum(weights.values())
@@ -132,25 +98,72 @@ def apportion(total, weights):
     return counts
 
 
-def plan_round(requests, pool):
-    """Requests per endpoint in every round: the count of each type split over its endpoints by weight."""
-    plan = {}
-    for kind, count in requests.items():
-        endpoints = [e for e in ENDPOINTS if e.kind == kind]
-        for e in endpoints:
-            if not e.available(pool):
-                print(f"skipping {e.label}: the benchmark database has no {e.pool}", file=sys.stderr)
-        plan |= apportion(count, {e.label: e.weight for e in endpoints if e.available(pool)})
-    return plan
-
-
 def describe_requests(requests):
     kinds = ", ".join(f"{kind} {count}" for kind, count in requests.items() if count)
     return f"{sum(requests.values())} requests per round ({kinds})"
 
 
-def build_round(pool, plan, rng):
-    """The steps of one round in random order; the same seed gives the same round."""
-    steps = [BY_LABEL[label].step(pool, rng, i) for label, count in plan.items() for i in range(count)]
-    rng.shuffle(steps)
-    return steps
+@dataclass
+class Workload:
+    """The endpoints of a workload file and how many requests a round sends to them by default."""
+
+    requests_per_round: int
+    endpoints: list[Endpoint]
+
+    @classmethod
+    def load(cls, path=DEFAULT_WORKLOAD):
+        """Read the workload file ``path``; exits listing the problems of an invalid one."""
+        with open(path, "rb") as file:
+            data = tomllib.load(file)
+        problems, endpoints = [], []
+        for entry in data.get("endpoints", []):
+            try:
+                endpoints.append(Endpoint(**entry))
+            except TypeError as error:
+                problems.append(f"{entry.get('label', entry)}: {error}")
+        workload = cls(data.get("requests_per_round"), endpoints)
+        problems += workload._problems()
+        if problems:
+            raise SystemExit(f"invalid workload {path}:\n  " + "\n  ".join(problems))
+        return workload
+
+    def _problems(self):
+        if not isinstance(self.requests_per_round, int) or self.requests_per_round < 0:
+            yield "requests_per_round must be a whole number"
+        if not self.endpoints:
+            yield "there are no endpoints"
+        for label, count in Counter(e.label for e in self.endpoints).items():
+            if count > 1:
+                yield f"{label}: {count} endpoints have this label"
+        for e in self.endpoints:
+            for name, allowed in (("kind", KINDS), ("actor", ACTORS), ("pool", (None, *POOLS))):
+                if getattr(e, name) not in allowed:
+                    yield f"{e.label}: {name} must be one of {', '.join(filter(None, allowed))}"
+            if not isinstance(e.weight, int) or e.weight < 1:
+                yield f"{e.label}: weight must be a whole number of at least 1"
+
+    @cached_property
+    def by_label(self):
+        return {e.label: e for e in self.endpoints}
+
+    def default_requests(self):
+        """Requests per type: their endpoints' share of ``requests_per_round`` by weight."""
+        shares = apportion(self.requests_per_round, {e.label: e.weight for e in self.endpoints})
+        return {kind: sum(shares[e.label] for e in self.endpoints if e.kind == kind) for kind in KINDS}
+
+    def plan_round(self, requests, pool):
+        """Requests per endpoint in every round: the count of each type split over its endpoints by weight."""
+        plan = {}
+        for kind, count in requests.items():
+            endpoints = [e for e in self.endpoints if e.kind == kind]
+            for e in endpoints:
+                if not e.available(pool):
+                    print(f"skipping {e.label}: the benchmark database has no {e.pool}", file=sys.stderr)
+            plan |= apportion(count, {e.label: e.weight for e in endpoints if e.available(pool)})
+        return plan
+
+    def build_round(self, pool, plan, rng):
+        """The steps of one round in random order; the same seed gives the same round."""
+        steps = [self.by_label[label].step(pool, rng, i) for label, count in plan.items() for i in range(count)]
+        rng.shuffle(steps)
+        return steps

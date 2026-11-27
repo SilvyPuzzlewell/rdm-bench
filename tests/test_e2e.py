@@ -23,7 +23,7 @@ import pytest
 import redis
 
 from rdmbench import instance
-from rdmbench.workload import BY_LABEL, ENDPOINTS, KINDS
+from rdmbench.workload import KINDS, Workload
 
 pytestmark = pytest.mark.e2e
 
@@ -33,6 +33,7 @@ SETUP = (
     "--users 6 --communities 1 --restricted-communities 1 --curators 1 --readers 1 --records 8 "
     "--community-records 4 --drafts 2 --submissions 2 --inclusions 1 --restricted-share 0.5 --files-share 1"
 ).split()
+ENDPOINTS = Workload.load().endpoints
 # As many requests of each type as its endpoints weigh, so that every endpoint gets at least one.
 REQUESTS = [arg for kind in KINDS for arg in (f"--{kind}", str(sum(e.weight for e in ENDPOINTS if e.kind == kind)))]
 EXPECTED_STATUS = {"api:draft-create": 201, "api:draft-delete": 204, "ui:record-landing-denied": 302}
@@ -61,6 +62,7 @@ class Throwaway:
             instance.BENCH_DIR / "rdmbench", self.copy / "rdmbench", ignore=shutil.ignore_patterns("__pycache__")
         )
         shutil.copy(instance.BENCH_DIR / "rdm_permissions_bench.py", self.copy)
+        shutil.copy(instance.BENCH_DIR / "workload.toml", self.copy)
         repo = root / "inveniordm-reference-repo"
         repo.mkdir()
         for name in ("invenio.cfg", "app_data", "templates", "static"):
@@ -145,7 +147,7 @@ def test_every_endpoint_gets_its_expected_answer_in_every_run(compared):
         (s["label"], s["status"]) for result in compared.results for samples in result["rounds"] for s in samples
     }
 
-    assert answers == {(label, EXPECTED_STATUS.get(label, 200)) for label in BY_LABEL}
+    assert answers == {(e.label, EXPECTED_STATUS.get(e.label, 200)) for e in ENDPOINTS}
     assert "status codes identical across all runs and variants" in compared.stdout
 
 

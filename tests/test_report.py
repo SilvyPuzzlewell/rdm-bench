@@ -12,6 +12,8 @@ def result(variant, rounds, status=200):
         "variant": variant,
         "source": f"{variant} code",
         "state": asdict(StateSpec()),
+        "workload": "workload.toml",
+        "endpoints": [{"label": "api:search-records", "kind": "search"}, {"label": "api:record-read", "kind": "read"}],
         "requests": {"search": 1, "read": 1},
         "plugins": ["allows"],
         "rounds": [

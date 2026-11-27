@@ -2,8 +2,9 @@ import random
 
 import pytest
 
-from rdmbench.workload import DEFAULT_REQUESTS, ENDPOINTS, Pool, apportion, build_round, plan_round
+from rdmbench.workload import Endpoint, Pool, Workload, apportion
 
+WORKLOAD = Workload.load()
 ADMIN = "admin@example.org"
 # One item for every pool: rec1 is public with a file, rec2 restricted in community com1.
 STATE = {
@@ -31,13 +32,58 @@ def test_apportion_splits_by_weight_and_gives_leftovers_to_the_largest_remainder
     assert apportion(total, weights) == expected
 
 
-def test_default_requests_are_300_requests_split_over_all_endpoints_by_weight():
-    expected = apportion(300, {e.label: e.weight for e in ENDPOINTS})
-    assert plan_round(DEFAULT_REQUESTS, Pool(STATE)) == expected
+def test_default_workload_splits_300_requests_over_all_endpoints_by_weight():
+    expected = apportion(300, {e.label: e.weight for e in WORKLOAD.endpoints})
+
+    assert WORKLOAD.default_requests() == {"search": 115, "read": 161, "create": 8, "update": 8, "delete": 8}
+    assert WORKLOAD.plan_round(WORKLOAD.default_requests(), Pool(STATE)) == expected
+
+
+def test_a_workload_file_sets_the_endpoints_and_the_requests_per_round(tmp_path):
+    path = tmp_path / "workload.toml"
+    path.write_text(
+        "requests_per_round = 4\n"
+        "endpoints = [\n"
+        '  { label = "frontpage", kind = "read", weight = 3, actor = "anonymous", url = "/" },\n'
+        '  { label = "search", kind = "search", weight = 1, actor = "user", url = "/search?q={word}" },\n'
+        "]\n"
+    )
+    workload = Workload.load(path)
+
+    assert workload.endpoints == [
+        Endpoint("frontpage", "read", 3, "anonymous", "/"),
+        Endpoint("search", "search", 1, "user", "/search?q={word}"),
+    ]
+    assert workload.default_requests() == {"search": 1, "read": 3, "create": 0, "update": 0, "delete": 0}
+
+
+@pytest.mark.parametrize(
+    "endpoints, problem",
+    [
+        ('{ label = "x", kind = "browse", weight = 1, actor = "user", url = "/" }', "x: kind must be one of search"),
+        ('{ label = "x", kind = "read", weight = 1, actor = "curater", url = "/" }', "x: actor must be one of anon"),
+        ('{ label = "x", kind = "read", weight = 1, actor = "user", url = "/", pool = "record" }', "x: pool must be"),
+        ('{ label = "x", kind = "read", weight = 0, actor = "user", url = "/" }', "x: weight must be a whole number"),
+        ('{ label = "x", kind = "read", wieght = 1, actor = "user", url = "/" }', "x: .* keyword argument 'wieght'"),
+        (
+            (
+                '{ label = "x", kind = "read", weight = 1, actor = "user", url = "/" }, '
+                '{ label = "x", kind = "search", weight = 1, actor = "user", url = "/search" }'
+            ),
+            "x: 2 endpoints have this label",
+        ),
+    ],
+)
+def test_invalid_workloads_are_rejected(tmp_path, endpoints, problem):
+    path = tmp_path / "workload.toml"
+    path.write_text(f"requests_per_round = 10\nendpoints = [{endpoints}]\n")
+
+    with pytest.raises(SystemExit, match=problem):
+        Workload.load(path)
 
 
 def test_endpoints_the_database_cannot_serve_are_skipped_with_a_warning(capsys):
-    plan = plan_round({"read": 56}, Pool({**STATE, "drafts": []}))
+    plan = WORKLOAD.plan_round({"read": 56}, Pool({**STATE, "drafts": []}))
 
     assert "api:draft-read" not in plan
     assert "ui:deposit-edit" not in plan
@@ -61,7 +107,7 @@ def test_endpoints_the_database_cannot_serve_are_skipped_with_a_warning(capsys):
     ],
 )
 def test_requests_are_sent_by_the_right_actor_to_the_right_url(label, actors, url):
-    steps = build_round(Pool(STATE), {label: 20}, random.Random(0))
+    steps = WORKLOAD.build_round(Pool(STATE), {label: 20}, random.Random(0))
 
     assert {s.actor for s in steps} <= actors
     assert {s.url for s in steps} == {url}
@@ -69,14 +115,14 @@ def test_requests_are_sent_by_the_right_actor_to_the_right_url(label, actors, ur
 
 def test_the_same_seed_gives_the_same_round():
     pool = Pool(STATE)
-    plan = plan_round(DEFAULT_REQUESTS, pool)
+    plan = WORKLOAD.plan_round(WORKLOAD.default_requests(), pool)
 
-    assert build_round(pool, plan, random.Random(1)) == build_round(pool, plan, random.Random(1))
-    assert build_round(pool, plan, random.Random(1)) != build_round(pool, plan, random.Random(2))
+    assert WORKLOAD.build_round(pool, plan, random.Random(1)) == WORKLOAD.build_round(pool, plan, random.Random(1))
+    assert WORKLOAD.build_round(pool, plan, random.Random(1)) != WORKLOAD.build_round(pool, plan, random.Random(2))
 
 
 def test_updates_of_one_actor_share_a_draft_and_every_delete_has_its_own():
-    steps = build_round(Pool(STATE), {"api:draft-update": 10, "api:draft-delete": 5}, random.Random(0))
+    steps = WORKLOAD.build_round(Pool(STATE), {"api:draft-update": 10, "api:draft-delete": 5}, random.Random(0))
     updates = [s for s in steps if s.label == "api:draft-update"]
     deletes = [s for s in steps if s.label == "api:draft-delete"]
 

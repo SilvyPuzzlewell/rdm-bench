@@ -2,10 +2,11 @@
 
 import statistics
 from collections import Counter
+from pathlib import Path
 
 from rdmbench import plugins
 from rdmbench.state import StateSpec
-from rdmbench.workload import BY_LABEL, KINDS, describe_requests
+from rdmbench.workload import KINDS, describe_requests
 
 VARIANTS = ("baseline", "patched")
 
@@ -24,7 +25,7 @@ def _header(outputs):
     lines = [f"{v:9} {outputs[v][0]['source']}" for v in VARIANTS]
     lines += [
         f"database  {StateSpec(**first['state']).describe()}",
-        f"workload  {describe_requests(first['requests'])}",
+        f"workload  {Path(first['workload']).name}, {describe_requests(first['requests'])}",
         f"plugins   {', '.join(first['plugins']) or 'none'}",
         f"{len(outputs['baseline'])} runs per variant x {len(first['rounds'])} rounds",
     ]
@@ -35,12 +36,12 @@ def _medians(outputs):
     """Medians per round of every metric, for all requests and per type."""
     metrics = plugins.metrics(outputs["baseline"][0]["plugins"])
     rounds = {v: [samples for result in outputs[v] for samples in result["rounds"]] for v in VARIANTS}
-    sizes = Counter(BY_LABEL[s["label"]].kind for s in rounds["baseline"][0])
+    kinds = {e["label"]: e["kind"] for e in outputs["baseline"][0]["endpoints"]}
+    sizes = Counter(kinds[s["label"]] for s in rounds["baseline"][0])
 
     def median(variant, kind, key):
         return statistics.median(
-            sum(s[key] for s in samples if kind == "all" or BY_LABEL[s["label"]].kind == kind)
-            for samples in rounds[variant]
+            sum(s[key] for s in samples if kind == "all" or kinds[s["label"]] == kind) for samples in rounds[variant]
         )
 
     header = f"{'median/round':16} {'requests':>8}"
